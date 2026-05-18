@@ -5,10 +5,11 @@ package util
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/open-telemetry/opentelemetry-go-compile-instrumentation/tool/ex"
 )
 
 const (
@@ -18,6 +19,9 @@ const (
 	// EnvOtelcStats enables per-toolexec timing stats when set to "1".
 	// Set automatically when --stats is used; propagated to child processes.
 	EnvOtelcStats = "OTELC_STATS"
+	// EnvOtelcDebug enables debug-level logging when set to "1".
+	// Set automatically when --debug is used; propagated to child processes.
+	EnvOtelcDebug = "OTELC_DEBUG"
 	BuildTempDir  = ".otelc-build"
 	OtelcRoot     = "github.com/open-telemetry/opentelemetry-go-compile-instrumentation"
 )
@@ -64,7 +68,7 @@ func copyBackupFiles(names []string, src, dst string) error {
 	for _, name := range names {
 		srcFile := filepath.Join(src, name)
 		dstFile := filepath.Join(dst, name)
-		err = errors.Join(err, CopyFile(srcFile, dstFile))
+		err = ex.Join(err, CopyFile(srcFile, dstFile))
 	}
 	return err
 }
