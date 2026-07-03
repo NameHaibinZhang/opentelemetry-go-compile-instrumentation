@@ -245,3 +245,104 @@ func TestHeaderCarrier_SetGetKeys(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{"traceparent", "baggage"}, hc.Keys())
 }
+
+// TestAfterWriteMessages_PartialFailure verifies that when WriteMessages returns
+// kafka.WriteErrors (a []error aligned with the message slice), only the spans for
+// messages that actually failed are marked as Error; the spans for successful
+// messages stay Ok.
+func TestAfterWriteMessages_PartialFailure(t *testing.T) {
+	sr := setupTest(t)
+
+	w := &kafka.Writer{Addr: kafka.TCP("localhost:9092"), Topic: "orders"}
+	msgs := []kafka.Message{
+		{Key: []byte("k1"), Value: []byte("hello")},
+		{Key: []byte("k2"), Value: []byte("world")},
+	}
+
+	ictx := hooktest.NewMockHookContext(w, context.Background(), msgs)
+	BeforeWriteMessages(ictx, w, context.Background(), msgs...)
+
+	// Simulate a partial failure: the first message succeeds, the second fails.
+	writeErrs := kafka.WriteErrors{nil, errors.New("write failed")}
+	AfterWriteMessages(ictx, writeErrs)
+
+	spans := sr.Ended()
+	require.Len(t, spans, 2)
+
+	// First span should not be marked as Error (message succeeded).
+	assert.Equal(t, codes.Unset, spans[0].Status().Code)
+
+	// Second span should be marked as Error.
+	assert.Equal(t, codes.Error, spans[1].Status().Code)
+	assert.Contains(t, spans[1].Status().Description, "write failed")
+}
+
+// TestAfterWriteMessages_AlwaysEndsSpans verifies that AfterWriteMessages ends
+// spans even when instrumentation is disabled between Before and After calls.
+// This prevents span leaks when the Enable() flag flips after headers have
+// already been injected.
+func TestAfterWriteMessages_AlwaysEndsSpans(t *testing.T) {
+	sr := setupTest(t)
+
+	w := &kafka.Writer{Addr: kafka.TCP("localhost:9092"), Topic: "orders"}
+	msgs := []kafka.Message{
+		{Key: []byte("k1"), Value: []byte("hello")},
+		{Key: []byte("k2"), Value: []byte("world")},
+	}
+
+	// BeforeWriteMessages runs while kafka is enabled — spans are created and
+	// trace headers are injected into the messages.
+	ictx := hooktest.NewMockHookContext(w, context.Background(), msgs)
+	BeforeWriteMessages(ictx, w, context.Background(), msgs...)
+
+	// Simulate instrumentation being disabled between Before and After.
+	t.Setenv("OTEL_GO_DISABLED_INSTRUMENTATIONS", "kafka")
+
+	// AfterWriteMessages must still end the spans to avoid leaking them.
+	AfterWriteMessages(ictx, nil)
+
+	spans := sr.Ended()
+	require.Len(t, spans, 2, "spans must be ended even when instrumentation is disabled after Before")
+}
+
+// TestExtractContext verifies that ExtractContext correctly extracts the trace
+// context from a Kafka message's headers and returns a context that carries the
+// propagated span context.
+func TestExtractContext(t *testing.T) {
+	setupTest(t)
+
+	// Create a span context and inject it into message headers, simulating a
+	// producer that has propagated its trace context.
+	tid, err := trace.TraceIDFromHex("0102030405060708090a0b0c0d0e0f10")
+	require.NoError(t, err)
+	sid, err := trace.SpanIDFromHex("0102030405060708")
+	require.NoError(t, err)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		SpanID:     sid,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	producerCtx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	var headers []kafka.Header
+	propagator.Inject(producerCtx, headerCarrier{headers: &headers})
+
+	msg := kafka.Message{
+		Topic:   "orders",
+		Key:     []byte("k1"),
+		Value:   []byte("hello"),
+		Headers: headers,
+	}
+
+	// Extract the context from the message.
+	extractedCtx := ExtractContext(msg)
+	extractedSc := trace.SpanContextFromContext(extractedCtx)
+
+	// Verify the extracted context matches what was injected.
+	assert.True(t, extractedSc.IsValid())
+	assert.Equal(t, tid, extractedSc.TraceID())
+	assert.Equal(t, sid, extractedSc.SpanID())
+	assert.True(t, extractedSc.IsSampled())
+	assert.True(t, extractedSc.IsRemote())
+}

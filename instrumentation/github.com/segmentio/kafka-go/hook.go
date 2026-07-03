@@ -5,7 +5,7 @@ package kafka
 
 import (
 	"context"
-	"runtime/debug"
+	"errors"
 	"sync"
 	"time"
 
@@ -27,39 +27,13 @@ var (
 	initOnce   sync.Once
 )
 
-// moduleVersion extracts the version from the Go module system.
-// Falls back to "dev" if the version cannot be determined.
-func moduleVersion() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "dev"
-	}
-	if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		return bi.Main.Version
-	}
-	return "dev"
-}
-
 func initInstrumentation() {
 	initOnce.Do(func() {
-		version := moduleVersion()
-		if err := runtime.SetupOTelSDK(
-			"go.opentelemetry.io/compile-instrumentation/github.com/segmentio/kafka-go",
-			version,
-		); err != nil {
-			logger.Error("failed to setup OTel SDK", "error", err)
-		}
 		tracer = otel.GetTracerProvider().Tracer(
 			instrumentationName,
-			trace.WithInstrumentationVersion(version),
+			trace.WithInstrumentationVersion(runtime.ModuleVersion()),
 		)
 		propagator = otel.GetTextMapPropagator()
-
-		// Start runtime metrics (respects OTEL_GO_ENABLED/DISABLED_INSTRUMENTATIONS)
-		if err := runtime.StartRuntimeMetrics(); err != nil {
-			logger.Error("failed to start runtime metrics", "error", err)
-		}
-
 		logger.Info("Kafka (segmentio/kafka-go) instrumentation initialized")
 	})
 }
@@ -118,19 +92,32 @@ func BeforeWriteMessages(
 }
 
 // AfterWriteMessages finalizes the producer spans created by BeforeWriteMessages.
+//
+// kafka.WriteMessages may return kafka.WriteErrors — a []error aligned with
+// the message slice — to indicate partial success. When that happens, only the
+// spans for messages whose entry is non-nil are marked as Error; the rest stay
+// Ok. For any other error type, the error is applied to every span.
 func AfterWriteMessages(ictx hook.HookContext, err error) {
-	if !kafkaEnabler.Enable() {
-		return
-	}
 	spans, ok := ictx.GetData().([]trace.Span)
 	if !ok {
 		return
 	}
-	for _, span := range spans {
+
+	var writeErrs kafka.WriteErrors
+	isWriteErrors := errors.As(err, &writeErrs)
+
+	for i, span := range spans {
 		if span == nil {
 			continue
 		}
-		if err != nil {
+		if isWriteErrors {
+			// Partial failure: only mark the spans for messages that actually
+			// failed (index-aligned with writeErrs).
+			if i < len(writeErrs) && writeErrs[i] != nil {
+				span.RecordError(writeErrs[i])
+				span.SetStatus(codes.Error, writeErrs[i].Error())
+			}
+		} else if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -178,10 +165,12 @@ func BeforeReadMessage(ictx hook.HookContext, r *kafka.Reader, ctx context.Conte
 
 // AfterReadMessage creates a consumer span that links to the producer via the
 // trace context carried in the Kafka message headers.
+//
+// The Enable() check is intentionally omitted: if BeforeReadMessage was
+// disabled, no consumerData was stored, so GetData returns nil and we return
+// early anyway. Re-checking here could skip span.End() if the flag flipped
+// between Before and After, leaking spans whose context was already injected.
 func AfterReadMessage(ictx hook.HookContext, msg kafka.Message, err error) {
-	if !kafkaEnabler.Enable() {
-		return
-	}
 	data, ok := ictx.GetData().(*consumerData)
 	if !ok || data == nil {
 		return
@@ -220,4 +209,18 @@ func AfterReadMessage(ictx hook.HookContext, msg kafka.Message, err error) {
 		span.SetStatus(codes.Error, err.Error())
 	}
 	span.End()
+}
+
+// ExtractContext extracts the trace context from a Kafka message's headers
+// and returns a context.Context that carries the propagated span context.
+//
+// Use this with the message returned by (*kafka.Reader).ReadMessage to
+// continue the trace in downstream message-processing code:
+//
+//	msg, err := r.ReadMessage(ctx)
+//	ctx = kafka.ExtractContext(msg)
+//	// spans created with ctx will be children of the producer span.
+func ExtractContext(msg kafka.Message) context.Context {
+	initInstrumentation()
+	return propagator.Extract(context.Background(), headerCarrier{headers: &msg.Headers})
 }
