@@ -6,7 +6,7 @@
 # Pre-fetch the upstream OpenTelemetry semantic-conventions registry into
 # `schemas/otelc/.deps/` so weaver doesn't have to clone it over the network
 # on every container start. The pinned upstream version is parsed out of
-# `schemas/otelc/manifest.yaml` so there's a single source of truth.
+# `schemas/otelc/registry_manifest.yaml` so there's a single source of truth.
 
 set -euo pipefail
 
