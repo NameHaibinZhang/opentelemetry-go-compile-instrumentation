@@ -13,9 +13,8 @@ jobs:
     name: Regenerate Bundle
     runs-on: ubuntu-latest
     if: >-
-      github.event.issue.pull_request &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      github.event.comment.body == '/regenerate-bundle'
+      github.event.issue.pull_request && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      && github.event.comment.body == '/regenerate-bundle'
     steps:
       - name: Get PR details
         id: pr
@@ -26,9 +25,11 @@ jobs:
           head_ref=$(echo "$pr_json" | jq -r '.head.ref')
           head_repo_full=$(echo "$pr_json" | jq -r '.head.repo.full_name')
           is_fork=$(echo "$pr_json" | jq -r '.head.repo.fork')
-          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
-          echo "head_repo_full=$head_repo_full" >> "$GITHUB_OUTPUT"
-          echo "is_fork=$is_fork" >> "$GITHUB_OUTPUT"
+          {
+            echo "head_ref=$head_ref"
+            echo "head_repo_full=$head_repo_full"
+            echo "is_fork=$is_fork"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Abort if fork PR
         if: steps.pr.outputs.is_fork == 'true'
