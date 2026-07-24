@@ -29,25 +29,13 @@ This project uses several tools for development. Most tools will be automaticall
    cd opentelemetry-go-compile-instrumentation
    ```
 
-2. Configure the git merge driver for the instrumentation bundle (run once per clone):
-
-   ```sh
-   make setup-git
-   ```
-
-   `tool/data/otelc-bundle.tgz` is a binary archive generated from `pkg/` and
-   `instrumentation/`, so git cannot merge it and it conflicts on almost every
-   rebase. This registers a merge driver that keeps the current bundle instead
-   of stopping the rebase/merge; you then refresh it with `make package`. See
-   [Keeping the bundle in sync](#keeping-the-bundle-in-sync).
-
-3. Build the project:
+2. Build the project:
 
    ```sh
    make build
    ```
 
-4. Run tests:
+3. Run tests:
 
    ```sh
    make test
@@ -144,42 +132,23 @@ make all
 
 This will run: `build`, `format`, `lint`, and `test` in sequence.
 
-### Keeping the bundle in sync
+### The instrumentation bundle
 
 `tool/data/otelc-bundle.tgz` is a reproducible archive of `pkg/` and
-`instrumentation/` that is embedded into `otelc` via `//go:embed`. It must stay
-committed so that `go install go.opentelemetry.io/otelc/tool/cmd/otelc@latest`
-works, but because it is binary, git cannot 3-way merge it — so any branch that
-touches the sources conflicts with `main` on this file.
+`instrumentation/` that is embedded into `otelc` via `//go:embed`. It is **not**
+committed to the repository (it is a build artifact, listed in `.gitignore`) —
+`make package` regenerates it from the current sources, and all `make build`,
+`make install`, and `make test-*` targets run `make package` first.
 
-To make this painless, run `make setup-git` once per clone (see
-[Getting Started](#getting-started)). It registers a custom merge driver
-(defined in `.gitattributes` + `.github/scripts/merge-bundle.sh`) that keeps the
-current ("ours") bundle on conflict so the rebase/merge runs to completion
-without stopping. You then regenerate the bundle from the fully-merged sources:
+Because it is generated on demand, it never causes merge conflicts. Two things
+follow from it not being committed:
 
-```sh
-git fetch origin main
-git rebase origin/main   # no longer halts on the bundle
-make package             # regenerate tool/data/otelc-bundle.tgz from merged sources
-git add tool/data/otelc-bundle.tgz && git commit --amend --no-edit
-git push --force-with-lease
-```
-
-Why the driver doesn't regenerate the bundle for you: when git invokes a merge
-driver it has not yet written the *other* merged source files to the working
-tree, so running `make package` at that moment would embed stale sources and
-miss the incoming changes. Regenerating after the rebase/merge completes is the
-only reliable point, hence the explicit `make package` step above.
-
-Notes:
-
-- GitHub's "This branch has conflicts" indicator is computed server-side and
-  does **not** use your local merge driver. Rebase locally as above and push;
-  the conflict disappears once your branch is up to date.
-- The `verify-bundle` CI guarantees the committed bundle matches the sources, so
-  a forgotten `make package` fails CI rather than shipping a stale bundle.
-  Maintainers can also comment `/regenerate-bundle` on a PR to auto-fix it.
+- Run a `make` target (e.g. `make build`) at least once after cloning or after
+  editing `pkg/`/`instrumentation/`. A bare `go build`/`go test` (or your IDE)
+  will fail on the `//go:embed` directive until the bundle exists.
+- `go install go.opentelemetry.io/otelc/tool/cmd/otelc@latest` is not supported,
+  since the module fetched by the Go proxy does not contain the generated
+  bundle. Clone the repo and run `make install` instead.
 
 ### Tools
 
