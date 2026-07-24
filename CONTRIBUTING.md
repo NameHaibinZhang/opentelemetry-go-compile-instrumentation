@@ -132,6 +132,24 @@ make all
 
 This will run: `build`, `format`, `lint`, and `test` in sequence.
 
+### The instrumentation bundle
+
+`tool/data/otelc-bundle.tgz` is a reproducible archive of `pkg/` and
+`instrumentation/` that is embedded into `otelc` via `//go:embed`. It is **not**
+committed to the repository (it is a build artifact, listed in `.gitignore`) —
+`make package` regenerates it from the current sources, and all `make build`,
+`make install`, and `make test-*` targets run `make package` first.
+
+Because it is generated on demand, it never causes merge conflicts. Two things
+follow from it not being committed:
+
+- Run a `make` target (e.g. `make build`) at least once after cloning or after
+  editing `pkg/`/`instrumentation/`. A bare `go build`/`go test` (or your IDE)
+  will fail on the `//go:embed` directive until the bundle exists.
+- `go install go.opentelemetry.io/otelc/tool/cmd/otelc@latest` is not supported,
+  since the module fetched by the Go proxy does not contain the generated
+  bundle. Clone the repo and run `make install` instead.
+
 ### Tools
 
 The following development tools are used and will be automatically installed on first use:
